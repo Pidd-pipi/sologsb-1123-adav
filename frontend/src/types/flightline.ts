@@ -22,6 +22,8 @@ export interface FlightLine {
   batteryCount: number;
   /** 航带方向 ° */
   heading: number;
+  /** 保存航线参数时任务锁定的相机预设修订号（与飞行时修订一致，成果回算以此为准） */
+  cameraRevision?: number;
   updatedAt: number;
 }
 

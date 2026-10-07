@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { Alert, Button, Card, Col, Row, Space, Table, Tag, Typography, type TableProps } from 'antd';
 import { useMissionStore } from '../stores/missionStore';
 import { useWaypointStore } from '../stores/waypointStore';
-import { useRouteMetrics, DEFAULT_ROUTE_PARAMS, type RouteParams } from '../hooks/useRouteMetrics';
+import { useRouteMetrics, DEFAULT_ROUTE_PARAMS, useMissionCamera, type RouteParams } from '../hooks/useRouteMetrics';
 import AmapRouteView from '../components/common/AmapRouteView';
 import OverlapCalcPanel from '../components/common/OverlapCalcPanel';
 import { loadFlightLine, saveFlightLine, splitSorties } from '../utils/db';
@@ -34,6 +34,7 @@ export default function RoutePlanner() {
   const [savedText, setSavedText] = useState('');
   const [error, setError] = useState('');
   const metrics = useRouteMetrics(id, params);
+  const { state: cameraState } = useMissionCamera(mission);
 
   useEffect(() => {
     if (!id) return;
@@ -71,6 +72,12 @@ export default function RoutePlanner() {
       estDuration: metrics.estDuration,
       batteryCount: metrics.batteryCount,
       heading: params.heading,
+      // 记录本次回算所依据的修订（已飞/归档为飞行时锁定修订；规划中为最新修订）
+      cameraRevision: cameraState?.bound
+        ? cameraState.locked
+          ? cameraState.currentRevision
+          : cameraState.latest?.revision
+        : undefined,
       updatedAt: Date.now(),
     };
     await saveFlightLine(line);
@@ -128,6 +135,14 @@ export default function RoutePlanner() {
         </Typography.Title>
         <Tag color="cyan">{mission.purpose}</Tag>
         <Tag>{mission.areaName}</Tag>
+        {cameraState?.bound ? (
+          <Tag color={cameraState.locked ? 'purple' : cameraState.outdated ? 'orange' : 'green'}>
+            相机修订 r{cameraState.locked ? cameraState.currentRevision : cameraState.latest?.revision}
+            {cameraState.locked ? ' · 飞行时锁定' : cameraState.outdated ? ` · 任务停留 r${cameraState.currentRevision}` : ' · 最新'}
+          </Tag>
+        ) : (
+          <Tag>未绑定相机预设</Tag>
+        )}
         <Tag color={missionWaypoints.length > 0 ? 'green' : 'default'}>航点 {missionWaypoints.length} 个</Tag>
         <div style={{ flex: 1 }} />
         <Button type="link">
@@ -145,6 +160,35 @@ export default function RoutePlanner() {
       </Space>
 
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
+      {cameraState?.locked ? (
+        <Alert
+          type="info"
+          showIcon
+          message={`该任务为${mission.status}，相机参数已锁在飞行时的修订 r${cameraState.currentRevision} 上；新修订只影响规划中任务，成果影像的分辨率与质量不变。`}
+        />
+      ) : null}
+      {cameraState?.outdated ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={`该任务停留在修订 r${cameraState.currentRevision}，预设已发布 r${cameraState.latest?.revision}，页面已按最新修订回算。`}
+          action={
+            <Button
+              size="small"
+              onClick={async () => {
+                try {
+                  await useMissionStore.getState().catchupMission(mission.id);
+                  setSavedText('已同步到最新修订');
+                } catch {
+                  setError('同步修订失败，旧修订仍保留，可稍后重试');
+                }
+              }}
+            >
+              重试同步
+            </Button>
+          }
+        />
+      ) : null}
 
       <Row gutter={14}>
         <Col span={15}>

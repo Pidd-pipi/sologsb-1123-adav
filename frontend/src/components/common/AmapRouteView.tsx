@@ -4,6 +4,7 @@ import type { LngLat, Mission } from '../../types/mission';
 import type { Waypoint } from '../../types/waypoint';
 import { createProjector, distanceMeters, groundCoverage } from '../../utils/geoCalc';
 import { loadAmap, readAmapKey, type AMapNamespace } from '../../utils/amapLoader';
+import { useMissionCamera } from '../../hooks/useRouteMetrics';
 
 export interface AmapRouteViewProps {
   mission?: Mission;
@@ -41,6 +42,8 @@ export default function AmapRouteView({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<{ destroy: () => void } | null>(null);
   const keyPresent = readAmapKey().length > 0;
+  // 已飞任务按飞行时修订绘视场，规划中任务按最新修订
+  const { camera } = useMissionCamera(mission);
 
   useEffect(() => {
     let alive = true;
@@ -104,8 +107,8 @@ export default function AmapRouteView({
         }),
       );
       if (withFov) {
-        const side = groundCoverage(mission.sensorWidth, w.altitude, mission.focalLength);
-        const along = groundCoverage(mission.sensorHeight, w.altitude, mission.focalLength);
+        const side = groundCoverage(camera.sensorWidth, w.altitude, camera.focalLength);
+        const along = groundCoverage(camera.sensorHeight, w.altitude, camera.focalLength);
         const dLat = side / 111320 / 2;
         const dLng = along / (111320 * Math.cos((w.lat * Math.PI) / 180)) / 2;
         overlays.push(
@@ -132,7 +135,7 @@ export default function AmapRouteView({
       }
       mapRef.current = null;
     };
-  }, [mode, amap, mission, waypoints, withFov]);
+  }, [mode, amap, mission, camera, waypoints, withFov]);
 
   // 本地 SVG 网格视图：等比投影，完全离线
   const projection = useMemo(() => {
@@ -160,8 +163,8 @@ export default function AmapRouteView({
   const fovRects = useMemo(() => {
     if (!withFov || !mission) return [];
     return waypoints.map((w) => {
-      const sideM = groundCoverage(mission.sensorWidth, w.altitude, mission.focalLength);
-      const alongM = groundCoverage(mission.sensorHeight, w.altitude, mission.focalLength);
+      const sideM = groundCoverage(camera.sensorWidth, w.altitude, camera.focalLength);
+      const alongM = groundCoverage(camera.sensorHeight, w.altitude, camera.focalLength);
       const p = projection.projector.toXY([w.lng, w.lat]);
       return {
         id: w.id,
@@ -172,7 +175,7 @@ export default function AmapRouteView({
         h: sideM * pxPerMeter,
       };
     });
-  }, [withFov, mission, waypoints, projection, pxPerMeter]);
+  }, [withFov, mission, camera, waypoints, projection, pxPerMeter]);
 
   if (mode === 'loading') {
     return (

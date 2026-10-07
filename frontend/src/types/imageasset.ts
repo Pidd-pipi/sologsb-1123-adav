@@ -23,6 +23,8 @@ export interface ImageAsset {
   quality: ImageQuality;
   /** 归档目录 */
   folder: string;
+  /** 拍摄时任务锁定的相机预设修订号（仅追溯用，不影响已记录的 GSD 与质量） */
+  cameraRevision?: number;
 }
 
 export type ImageAssetDraft = Omit<ImageAsset, 'id'>;

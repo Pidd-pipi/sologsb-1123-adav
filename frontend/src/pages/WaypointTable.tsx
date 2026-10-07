@@ -21,7 +21,7 @@ import {
 import { ImportOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { useMissionStore } from '../stores/missionStore';
 import { useWaypointStore } from '../stores/waypointStore';
-import { useRouteMetrics, DEFAULT_ROUTE_PARAMS } from '../hooks/useRouteMetrics';
+import { useRouteMetrics, DEFAULT_ROUTE_PARAMS, useMissionCamera } from '../hooks/useRouteMetrics';
 import AmapRouteView from '../components/common/AmapRouteView';
 import { WAYPOINT_ACTIONS, parseWaypointText, type Waypoint, type WaypointAction } from '../types/waypoint';
 import { calcGsd, groundCoverage } from '../utils/geoCalc';
@@ -60,6 +60,7 @@ export default function WaypointTable() {
 
   const preview = rows.find((w) => w.id === previewId) ?? rows[0];
   const metrics = useRouteMetrics(id, { ...DEFAULT_ROUTE_PARAMS, altitude: preview?.altitude ?? 120 });
+  const { camera, state: cameraState } = useMissionCamera(mission);
 
   const importPaste = async () => {
     const parsed = parseWaypointText(pasteText);
@@ -151,10 +152,10 @@ export default function WaypointTable() {
       width: 170,
       render: (_: unknown, row: Waypoint) =>
         mission
-          ? `${groundCoverage(mission.sensorWidth, row.altitude, mission.focalLength)} × ${groundCoverage(
-              mission.sensorHeight,
+          ? `${groundCoverage(camera.sensorWidth, row.altitude, camera.focalLength)} × ${groundCoverage(
+              camera.sensorHeight,
               row.altitude,
-              mission.focalLength,
+              camera.focalLength,
             )}`
           : '—',
     },
@@ -162,7 +163,7 @@ export default function WaypointTable() {
       title: '单点 GSD cm/px',
       width: 140,
       render: (_: unknown, row: Waypoint) =>
-        mission ? calcGsd(mission.pixelSize, row.altitude, mission.focalLength) : '—',
+        mission ? calcGsd(camera.pixelSize, row.altitude, camera.focalLength) : '—',
     },
     {
       title: '顺序',
@@ -220,7 +221,11 @@ export default function WaypointTable() {
           航点明细 · {mission.missionNo}
         </Typography.Title>
         <Tag color="green">航点 {rows.length} 个</Tag>
-        <Tag>传感器 {mission.sensorWidth}×{mission.sensorHeight} mm / f{mission.focalLength} mm</Tag>
+        <Tag>
+          修订 {cameraState?.bound ? `r${cameraState.currentRevision}` : '未绑定'}
+          {cameraState?.locked ? ' · 已锁定' : cameraState?.outdated ? ` · 落后（最新 r${cameraState.latest?.revision}）` : ' · 最新'}
+        </Tag>
+        <Tag>传感器 {camera.sensorWidth}×{camera.sensorHeight} mm / f{camera.focalLength} mm</Tag>
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/missions/${mission.id}/route`}>航线规划</Link>
@@ -270,11 +275,11 @@ export default function WaypointTable() {
                     {preview.altitude} m / {preview.speed} m/s / {preview.gimbalPitch}°
                   </Descriptions.Item>
                   <Descriptions.Item label="视场覆盖">
-                    旁向 {groundCoverage(mission.sensorWidth, preview.altitude, mission.focalLength)} m × 航向{' '}
-                    {groundCoverage(mission.sensorHeight, preview.altitude, mission.focalLength)} m
+                    旁向 {groundCoverage(camera.sensorWidth, preview.altitude, camera.focalLength)} m × 航向{' '}
+                    {groundCoverage(camera.sensorHeight, preview.altitude, camera.focalLength)} m
                   </Descriptions.Item>
                   <Descriptions.Item label="单点 GSD">
-                    {calcGsd(mission.pixelSize, preview.altitude, mission.focalLength)} cm/px
+                    {calcGsd(camera.pixelSize, preview.altitude, camera.focalLength)} cm/px
                   </Descriptions.Item>
                 </Descriptions>
                 <Row gutter={8} style={{ marginTop: 8 }}>

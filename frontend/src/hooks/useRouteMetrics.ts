@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useMissionStore } from '../stores/missionStore';
 import { useWaypointStore } from '../stores/waypointStore';
+import { missionCameraState } from '../utils/camera';
 import {
   calcGsd,
   estimateBatteries,
@@ -11,7 +12,9 @@ import {
   photoInterval,
   polygonAreaM2,
 } from '../utils/geoCalc';
-import type { LngLat } from '../types/mission';
+import type { CameraPreset, LngLat, Mission } from '../types/mission';
+import { isCameraLockedStatus } from '../types/mission';
+import { revisionsOfFamily } from '../utils/camera';
 
 export interface RouteParams {
   /** 相对航高 m */
@@ -60,6 +63,7 @@ export interface RouteMetrics {
  */
 export function useRouteMetrics(missionId: string | undefined, params: RouteParams = DEFAULT_ROUTE_PARAMS): RouteMetrics {
   const missions = useMissionStore((s) => s.items);
+  const presets = useMissionStore((s) => s.presets);
   const allWaypoints = useWaypointStore((s) => s.items);
 
   return useMemo<RouteMetrics>(() => {
@@ -69,10 +73,13 @@ export function useRouteMetrics(missionId: string | undefined, params: RoutePara
       .sort((a, b) => a.seq - b.seq)
       .map((w) => [w.lng, w.lat] as LngLat);
 
-    const sensorWidth = mission?.sensorWidth ?? 13.2;
-    const sensorHeight = mission?.sensorHeight ?? 8.8;
-    const focalLength = mission?.focalLength ?? 8.8;
-    const pixelSize = mission?.pixelSize ?? 2.4;
+    // 已飞/归档：用任务里冻结的快照（飞行时修订）；规划中/待飞：跟绑定族最新修订，
+    // 即便任务行追赶写入暂时失败，回算仍以最新修订为准（旧修订仍在、可重试追赶）
+    const camera = resolveMissionCamera(mission, presets);
+    const sensorWidth = camera.sensorWidth;
+    const sensorHeight = camera.sensorHeight;
+    const focalLength = camera.focalLength;
+    const pixelSize = camera.pixelSize;
 
     const gsd = calcGsd(pixelSize, params.altitude, focalLength);
     const spacing = lineSpacing(sensorWidth, params.altitude, focalLength, params.overlapSide);
@@ -111,5 +118,47 @@ export function useRouteMetrics(missionId: string | undefined, params: RoutePara
         durationMin: Math.round((estDuration / sortieCount) * 10) / 10,
       })),
     };
-  }, [missions, allWaypoints, missionId, params]);
+  }, [missions, presets, allWaypoints, missionId, params]);
+}
+
+/**
+ * 解析任务当前用于回算的相机参数：
+ * 已飞/归档 → 任务快照（飞行时修订）；规划中/待飞 → 绑定族最新修订；未绑定 → 任务快照。
+ */
+export function resolveMissionCamera(
+  mission: Mission | undefined,
+  presets: CameraPreset[],
+): Pick<Mission, 'cameraModel' | 'sensorWidth' | 'sensorHeight' | 'focalLength' | 'pixelSize'> {
+  const fallback = {
+    cameraModel: mission?.cameraModel ?? '',
+    sensorWidth: mission?.sensorWidth ?? 13.2,
+    sensorHeight: mission?.sensorHeight ?? 8.8,
+    focalLength: mission?.focalLength ?? 8.8,
+    pixelSize: mission?.pixelSize ?? 2.4,
+  };
+  if (!mission || !mission.presetId || isCameraLockedStatus(mission.status)) return fallback;
+  const family = revisionsOfFamily(presets, mission.presetId);
+  const latest = family[family.length - 1];
+  return latest
+    ? {
+        cameraModel: latest.cameraModel,
+        sensorWidth: latest.sensorWidth,
+        sensorHeight: latest.sensorHeight,
+        focalLength: latest.focalLength,
+        pixelSize: latest.pixelSize,
+      }
+    : fallback;
+}
+
+/**
+ * 页面消费任务相机参数的统一入口：
+ * 返回当前生效相机（锁定修订或最新修订）与修订状态（锁定/落后）。
+ */
+export function useMissionCamera(mission: Mission | undefined) {
+  const presets = useMissionStore((s) => s.presets);
+  return useMemo(() => {
+    const camera = resolveMissionCamera(mission, presets);
+    const state = mission ? missionCameraState(mission, presets) : undefined;
+    return { camera, state };
+  }, [mission, presets]);
 }

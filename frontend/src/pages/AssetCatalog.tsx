@@ -21,6 +21,7 @@ import AssetGrid from '../components/common/AssetGrid';
 import AmapRouteView from '../components/common/AmapRouteView';
 import { IMAGE_QUALITIES, type ImageAsset, type ImageAssetDraft, type ImageQuality } from '../types/imageasset';
 import { calcGsd, distanceMeters } from '../utils/geoCalc';
+import { useMissionCamera } from '../hooks/useRouteMetrics';
 
 /** /missions/:id/assets 成果影像编目：格子列出片号/缩略图/GSD/质量，多选标记、定位到图 */
 export default function AssetCatalog() {
@@ -34,6 +35,7 @@ export default function AssetCatalog() {
   const removeMany = useAssetStore((s) => s.removeMany);
 
   const mission = missions.find((m) => m.id === id);
+  const { camera, state: cameraState } = useMissionCamera(mission);
   const missionAssets = useMemo(
     () => assets.filter((a) => a.missionId === id).sort((a, b) => a.imageNo.localeCompare(b.imageNo, 'zh-Hans-CN', { numeric: true })),
     [assets, id],
@@ -74,20 +76,22 @@ export default function AssetCatalog() {
       setError('该任务暂无航点，请先到「航点明细」录入或点击网格新增');
       return;
     }
-    const gsd = calcGsd(mission.pixelSize, missionWaypoints[0].altitude, mission.focalLength);
+    const gsd = calcGsd(camera.pixelSize, missionWaypoints[0].altitude, camera.focalLength);
     const startNo = missionAssets.length + 1;
+    const cameraRevision = cameraState?.bound ? cameraState.currentRevision : undefined;
     const drafts: ImageAssetDraft[] = missionWaypoints.map((w, index) => ({
       missionId: mission.id,
       imageNo: `IMG_${String(2000 + startNo + index)}`,
       lng: w.lng,
       lat: w.lat,
       altitude: w.altitude,
-      gsd: calcGsd(mission.pixelSize, w.altitude, mission.focalLength) || gsd,
+      gsd: calcGsd(camera.pixelSize, w.altitude, camera.focalLength) || gsd,
       overlap: 75,
       tiltAngle: Math.abs(w.gimbalPitch + 90),
       shotAt: Date.now() + index * 1000,
       quality: '合格' as ImageQuality,
       folder: `/${mission.missionNo}/100MEDIA`,
+      cameraRevision,
     }));
     await addMany(drafts);
     setError('');
@@ -141,6 +145,11 @@ export default function AssetCatalog() {
         </Typography.Title>
         <Tag color="cyan">{mission.purpose}</Tag>
         <Tag>条目 {missionAssets.length} 张</Tag>
+        <Tag color={cameraState?.locked ? 'purple' : cameraState?.outdated ? 'orange' : 'green'}>
+          {cameraState?.bound
+            ? `相机修订 r${cameraState.currentRevision}${cameraState.locked ? '（飞行时锁定）' : cameraState.outdated ? `（落后，最新 r${cameraState.latest?.revision}）` : '（最新）'}`
+            : '未绑定相机预设'}
+        </Tag>
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/missions/${mission.id}/route`}>航线规划</Link>

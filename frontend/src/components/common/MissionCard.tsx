@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
-import { Card, Descriptions, Space, Tag, Typography } from 'antd';
+import { Button, Card, Descriptions, message, Space, Tag, Typography } from 'antd';
 import type { Mission } from '../../types/mission';
 import { polygonAreaM2 } from '../../utils/geoCalc';
 import { hasAmapKey } from '../../utils/amapLoader';
+import { missionCameraState } from '../../utils/camera';
+import { useMissionStore } from '../../stores/missionStore';
 
 export interface MissionCardProps {
   mission: Mission;
@@ -20,6 +22,49 @@ const STATUS_COLOR: Record<string, string> = {
   已归档: 'purple',
 };
 
+/** 相机修订标注：已飞/归档显示锁定修订，规划中/待飞显示跟随修订并标出是否落后 */
+function RevisionTag({ mission }: { mission: Mission }) {
+  const presets = useMissionStore((s) => s.presets);
+  const catchupMission = useMissionStore((s) => s.catchupMission);
+  const st = missionCameraState(mission, presets);
+
+  if (!st.bound) {
+    return <Tag>未绑定相机预设</Tag>;
+  }
+  if (st.locked) {
+    return (
+      <Tag color="purple" title="已飞行/归档，相机参数锁在飞行时的修订上">
+        相机修订 r{st.currentRevision} · 飞行时锁定
+      </Tag>
+    );
+  }
+  return (
+    <Space size={4}>
+      <Tag color={st.outdated ? 'orange' : 'green'} data-testid={`revision-tag-${mission.missionNo}`}>
+        相机修订 r{st.currentRevision}
+        {st.outdated ? ` · 落后（最新 r${st.latest?.revision}）` : ' · 最新'}
+      </Tag>
+      {st.outdated ? (
+        <Button
+          size="small"
+          type="link"
+          onClick={async (e) => {
+            e.stopPropagation();
+            try {
+              await catchupMission(mission.id);
+            } catch {
+              /* 写入失败保留旧修订，提示后可再点此重试 */
+              message.error(`同步修订失败，任务仍停留在 r${st.currentRevision}，可重试`);
+            }
+          }}
+        >
+          重试同步到 r{st.latest?.revision}
+        </Button>
+      ) : null}
+    </Space>
+  );
+}
+
 /** 任务摘要卡（编号、测区、机型、日期、航点数），被任务台账、航线规划页消费 */
 export default function MissionCard({ mission, waypointCount, assetCount, lineCount, onOpen, footer }: MissionCardProps) {
   return (
@@ -32,6 +77,7 @@ export default function MissionCard({ mission, waypointCount, assetCount, lineCo
           <span data-testid={`mission-card-${mission.missionNo}`}>{mission.missionNo}</span>
           <Tag color={STATUS_COLOR[mission.status]}>{mission.status}</Tag>
           <Tag color="cyan">{mission.purpose}</Tag>
+          <RevisionTag mission={mission} />
         </Space>
       }
     >
