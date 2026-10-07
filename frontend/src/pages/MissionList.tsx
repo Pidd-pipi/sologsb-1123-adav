@@ -23,6 +23,7 @@ import { useWaypointStore } from '../stores/waypointStore';
 import { useAssetStore } from '../stores/assetStore';
 import { useMissionFilter } from '../hooks/useMissionFilter';
 import MissionCard from '../components/common/MissionCard';
+import { isMissionStale } from '../utils/presetRevisions';
 import { MISSION_PURPOSES, MISSION_STATUSES, type LngLat, type MissionDraft, type MissionPurpose, type MissionStatus } from '../types/mission';
 
 const DEFAULT_POLYGON: LngLat[] = [
@@ -50,10 +51,24 @@ function textToPolygon(text: string): LngLat[] {
 export default function MissionList() {
   const navigate = useNavigate();
   const missions = useMissionStore((s) => s.items);
+  const presets = useMissionStore((s) => s.presets);
   const addMission = useMissionStore((s) => s.add);
+  const setMissionStatus = useMissionStore((s) => s.setStatus);
+  const syncMission = useMissionStore((s) => s.syncMission);
+  const syncAllStale = useMissionStore((s) => s.syncAllStale);
   const waypoints = useWaypointStore((s) => s.items);
   const assets = useAssetStore((s) => s.items);
   const { filters, patch, reset, result, options } = useMissionFilter();
+
+  // 每个预设系列只列最新修订，新建任务从最新修订跟随
+  const presetSeriesOptions = useMemo(() => {
+    const bySeries = new Map<string, (typeof presets)[number]>();
+    presets.forEach((p) => {
+      const cur = bySeries.get(p.seriesId);
+      if (!cur || p.revision > cur.revision) bySeries.set(p.seriesId, p);
+    });
+    return Array.from(bySeries.values()).map((p) => ({ value: p.seriesId, label: `${p.name}（rev${p.revision}）` }));
+  }, [presets]);
 
   const [open, setOpen] = useState(false);
   const [error, setError] = useState('');
@@ -70,6 +85,8 @@ export default function MissionList() {
     sensorHeight: 13,
     focalLength: 12.29,
     pixelSize: 3.3,
+    presetSeriesId: '',
+    presetRevision: 0,
     flightDate: new Date().toISOString().slice(0, 10),
     pilot: '',
     status: '规划中',
@@ -87,9 +104,33 @@ export default function MissionList() {
       waypoints: waypoints.length,
       assets: assets.length,
       qualified: assets.filter((a) => a.quality === '合格').length,
+      stale: missions.filter((m) => isMissionStale(presets, m)).length,
     }),
-    [missions, waypoints, assets],
+    [missions, waypoints, assets, presets],
   );
+
+  /** 新建任务选择相机预设系列：规划中的任务从该系列最新修订跟随 */
+  const chooseDraftSeries = (seriesId: string) => {
+    if (!seriesId) {
+      setDraft((prev) => ({ ...prev, presetSeriesId: '', presetRevision: 0 }));
+      return;
+    }
+    const revisions = presets
+      .filter((p) => p.seriesId === seriesId)
+      .sort((a, b) => b.revision - a.revision);
+    const latest = revisions[0];
+    if (!latest) return;
+    setDraft((prev) => ({
+      ...prev,
+      presetSeriesId: latest.seriesId,
+      presetRevision: latest.revision,
+      cameraModel: latest.cameraModel,
+      sensorWidth: latest.sensorWidth,
+      sensorHeight: latest.sensorHeight,
+      focalLength: latest.focalLength,
+      pixelSize: latest.pixelSize,
+    }));
+  };
 
   const submit = async () => {
     if (!draft.missionNo.trim()) {
@@ -105,8 +146,24 @@ export default function MissionList() {
       setError('测区边界至少需要 3 个经纬度点');
       return;
     }
+    // 选了预设系列时锁定到提交当时的最新修订号，之后由修订传播更新
+    const seriesId = draft.presetSeriesId;
+    const latest = seriesId
+      ? presets.filter((p) => p.seriesId === seriesId).sort((a, b) => b.revision - a.revision)[0]
+      : undefined;
     const created = await addMission({
       ...draft,
+      ...(latest
+        ? {
+            presetSeriesId: latest.seriesId,
+            presetRevision: latest.revision,
+            cameraModel: latest.cameraModel,
+            sensorWidth: latest.sensorWidth,
+            sensorHeight: latest.sensorHeight,
+            focalLength: latest.focalLength,
+            pixelSize: latest.pixelSize,
+          }
+        : { presetSeriesId: '', presetRevision: 0 }),
       missionNo: draft.missionNo.trim(),
       name: draft.name.trim() || draft.missionNo.trim(),
       areaPolygon: polygon,
@@ -125,7 +182,18 @@ export default function MissionList() {
         </Typography.Title>
         <Tag>共 {missions.length} 个任务</Tag>
         <Tag color="blue">筛选命中 {result.length} 个</Tag>
+        {stats.stale > 0 ? <Tag color="warning">落后修订 {stats.stale} 个</Tag> : null}
         <div style={{ flex: 1 }} />
+        <Button
+          icon={<ReloadOutlined />}
+          disabled={stats.stale === 0}
+          onClick={async () => {
+            const n = await syncAllStale();
+            setToast(`已把 ${n} 个规划中/待飞行任务同步到最新修订并重算航线指标`);
+          }}
+        >
+          同步落后任务（{stats.stale}）
+        </Button>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
           新建任务
         </Button>
@@ -222,9 +290,18 @@ export default function MissionList() {
             <Col key={row.mission.id} xs={24} xl={12}>
               <MissionCard
                 mission={row.mission}
+                presets={presets}
                 waypointCount={row.waypointCount}
                 assetCount={row.assetCount}
                 lineCount={row.waypointCount > 1 ? 1 : 0}
+                onStatusChange={(id, status) => {
+                  void setMissionStatus(id, status).then(() => {
+                    setToast(status === '已飞行' || status === '已归档' ? '已锁定到当前相机修订与航线指标' : '已解除锁定并跟随最新相机修订');
+                  });
+                }}
+                onSync={(id) => {
+                  void syncMission(id).then(() => setToast('已同步到最新相机修订，GSD/航线间距/预计张数与架次已重算'));
+                }}
                 footer={
                   <Space wrap size={4}>
                     <Button size="small" type="link" onClick={() => navigate(`/missions/${row.mission.id}/route`)}>
@@ -272,6 +349,14 @@ export default function MissionList() {
           </Space>
           <Space wrap size={10}>
             <Select
+              style={{ width: 260 }}
+              placeholder="相机预设系列（可选，默认手工录入）"
+              allowClear
+              value={draft.presetSeriesId || undefined}
+              onChange={(v?: string) => chooseDraftSeries(v ?? '')}
+              options={presetSeriesOptions}
+            />
+            <Select
               style={{ width: 130 }}
               value={draft.purpose}
               onChange={(v) => setDraft({ ...draft, purpose: v as MissionPurpose })}
@@ -281,31 +366,31 @@ export default function MissionList() {
               style={{ width: 160 }}
               placeholder="机型"
               value={draft.droneModel}
-              onChange={(e) => setDraft({ ...draft, droneModel: e.target.value })}
+              onChange={(e) => setDraft({ ...draft, droneModel: e.target.value, presetSeriesId: '', presetRevision: 0 })}
             />
             <Input
               style={{ width: 200 }}
               placeholder="相机型号"
               value={draft.cameraModel}
-              onChange={(e) => setDraft({ ...draft, cameraModel: e.target.value })}
+              onChange={(e) => setDraft({ ...draft, cameraModel: e.target.value, presetSeriesId: '', presetRevision: 0 })}
             />
           </Space>
           <Space wrap size={10}>
             <span>
               传感器宽 mm{' '}
-              <InputNumber value={draft.sensorWidth} step={0.1} onChange={(v) => setDraft({ ...draft, sensorWidth: Number(v) })} />
+              <InputNumber value={draft.sensorWidth} step={0.1} onChange={(v) => setDraft({ ...draft, sensorWidth: Number(v), presetSeriesId: '', presetRevision: 0 })} />
             </span>
             <span>
               高 mm{' '}
-              <InputNumber value={draft.sensorHeight} step={0.1} onChange={(v) => setDraft({ ...draft, sensorHeight: Number(v) })} />
+              <InputNumber value={draft.sensorHeight} step={0.1} onChange={(v) => setDraft({ ...draft, sensorHeight: Number(v), presetSeriesId: '', presetRevision: 0 })} />
             </span>
             <span>
               焦距 mm{' '}
-              <InputNumber value={draft.focalLength} step={0.01} onChange={(v) => setDraft({ ...draft, focalLength: Number(v) })} />
+              <InputNumber value={draft.focalLength} step={0.01} onChange={(v) => setDraft({ ...draft, focalLength: Number(v), presetSeriesId: '', presetRevision: 0 })} />
             </span>
             <span>
               像元 μm{' '}
-              <InputNumber value={draft.pixelSize} step={0.1} onChange={(v) => setDraft({ ...draft, pixelSize: Number(v) })} />
+              <InputNumber value={draft.pixelSize} step={0.1} onChange={(v) => setDraft({ ...draft, pixelSize: Number(v), presetSeriesId: '', presetRevision: 0 })} />
             </span>
           </Space>
           <Space wrap size={10}>

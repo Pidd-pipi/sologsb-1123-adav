@@ -4,10 +4,14 @@ import type { Waypoint } from '../types/waypoint';
 import type { FlightLine } from '../types/flightline';
 import { makeThumbDataUrl, type AssetThumb, type ImageAsset } from '../types/imageasset';
 import { newId } from './id';
+import { revisionAtFlightDate } from './presetRevisions';
 
 export const DB_NAME = 'gbdronemap';
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LS_VERSION_KEY = 'gbdronemap:db-version';
+
+/** 旧数据升级时，历史修订的生效时间取很早以前，使其对任意飞行日期都生效 */
+export const LEGACY_EFFECTIVE_AT = Date.UTC(1970, 0, 1);
 
 class DroneMapDB extends Dexie {
   missions!: Table<Mission, string>;
@@ -54,6 +58,79 @@ class DroneMapDB extends Dexie {
             if (row.updatedAt === undefined) row.updatedAt = Date.now();
             if (row.batteryCount === undefined) row.batteryCount = 1;
           });
+      });
+    // v3：相机预设带修订号（同一系列修订只追加不覆盖），任务记录所跟/所锁的系列与修订
+    this.version(3)
+      .stores({
+        missions: 'id, missionNo, areaName, droneModel, flightDate, status, purpose, presetSeriesId, createdAt',
+        waypoints: 'id, missionId, seq, action, altitude',
+        lines: 'id, missionId, lineNo, updatedAt',
+        assets: 'id, missionId, imageNo, quality, shotAt',
+        thumbs: 'id, missionId',
+        presets: 'id, seriesId, revision, name, cameraModel',
+      })
+      .upgrade(async (tx) => {
+        const presetRows: any[] = await tx.table('presets').toArray();
+        const missionRows: any[] = await tx.table('missions').toArray();
+
+        // 1) 旧预设原地补为各自系列的 rev1，生效时间置为最早，绝不覆盖其参数
+        presetRows.forEach((row) => {
+          row.seriesId = row.seriesId ?? row.id;
+          row.revision = row.revision ?? 1;
+          row.effectiveAt = typeof row.effectiveAt === 'number' ? row.effectiveAt : LEGACY_EFFECTIVE_AT;
+        });
+
+        // 2) 旧任务按飞行日期归到当时修订；一条都对不上就用任务快照补一条基础预设
+        const allPresets: CameraPreset[] = [...presetRows];
+        const sameParams = (m: any, p: CameraPreset) =>
+          Number(m.sensorWidth) === Number(p.sensorWidth) &&
+          Number(m.sensorHeight) === Number(p.sensorHeight) &&
+          Number(m.focalLength) === Number(p.focalLength) &&
+          Number(m.pixelSize) === Number(p.pixelSize);
+        const sameModel = (m: any, p: CameraPreset) =>
+          !!(m.cameraModel && p.cameraModel && m.cameraModel === p.cameraModel);
+        // 参数相同又匹配不到旧预设的多个任务，共用同一条补出来的基础预设
+        const basicByKey = new Map<string, CameraPreset>();
+
+        missionRows.forEach((m) => {
+          if (m.presetSeriesId) return;
+          const byParams = Array.from(new Set(allPresets.filter((p) => sameParams(m, p)).map((p) => p.seriesId)));
+          const byModel =
+            byParams.length > 0 ? [] : Array.from(new Set(allPresets.filter((p) => sameModel(m, p)).map((p) => p.seriesId)));
+          let hit: CameraPreset | undefined;
+          for (const sid of [...byParams, ...byModel]) {
+            hit = revisionAtFlightDate(allPresets, sid, m.flightDate);
+            if (hit) break;
+          }
+          if (hit) {
+            m.presetSeriesId = hit.seriesId;
+            m.presetRevision = hit.revision;
+            return;
+          }
+          const key = [m.cameraModel ?? '', m.sensorWidth, m.sensorHeight, m.focalLength, m.pixelSize].join('|');
+          let basic = basicByKey.get(key);
+          if (!basic) {
+            basic = {
+              id: newId('preset'),
+              seriesId: newId('series'),
+              revision: 1,
+              effectiveAt: LEGACY_EFFECTIVE_AT,
+              name: `基础预设 · ${m.cameraModel || '手工录入'}`,
+              cameraModel: m.cameraModel ?? '',
+              sensorWidth: m.sensorWidth ?? 13.2,
+              sensorHeight: m.sensorHeight ?? 8.8,
+              focalLength: m.focalLength ?? 8.8,
+              pixelSize: m.pixelSize ?? 2.4,
+            };
+            basicByKey.set(key, basic);
+            allPresets.push(basic);
+          }
+          m.presetSeriesId = basic.seriesId;
+          m.presetRevision = 1;
+        });
+
+        await tx.table('presets').bulkPut([...presetRows, ...Array.from(basicByKey.values())]);
+        await tx.table('missions').bulkPut(missionRows);
       });
   }
 }
@@ -111,6 +188,10 @@ export async function ensureSeedData(): Promise<void> {
 
   const missionA = newId('mission');
   const missionB = newId('mission');
+  // 相机预设以“系列 + 修订”的方式灌入
+  const seriesMavic = newId('series');
+  const seriesP1 = newId('series');
+  const seriesP4 = newId('series');
 
   const polygonA: [number, number][] = [
     [116.3912, 39.9075],
@@ -138,6 +219,9 @@ export async function ensureSeedData(): Promise<void> {
       sensorHeight: 13,
       focalLength: 12.29,
       pixelSize: 3.3,
+      // 已飞行：锁在飞行时的 rev1 上，之后追加修订也不会带偏它与成果影像
+      presetSeriesId: seriesMavic,
+      presetRevision: 1,
       flightDate: '2024-09-12',
       pilot: '穆清和',
       status: '已飞行',
@@ -156,6 +240,9 @@ export async function ensureSeedData(): Promise<void> {
       sensorHeight: 24,
       focalLength: 35,
       pixelSize: 4.4,
+      // 待飞行：跟随系列最新修订
+      presetSeriesId: seriesP1,
+      presetRevision: 1,
       flightDate: '2024-09-20',
       pilot: '纪长风',
       status: '待飞行',
@@ -247,6 +334,7 @@ export async function ensureSeedData(): Promise<void> {
       lng,
       lat,
       altitude: 120,
+      // 成果影像 GSD 是飞行实测值，永远不随预设修订变化
       gsd: 3.22,
       overlap: 76 - index,
       tiltAngle: 2 + index,
@@ -260,6 +348,9 @@ export async function ensureSeedData(): Promise<void> {
   const presets: CameraPreset[] = [
     {
       id: newId('preset'),
+      seriesId: seriesMavic,
+      revision: 1,
+      effectiveAt: now - 60 * day,
       name: 'Mavic 3E 广角',
       cameraModel: 'DJI 4/3 CMOS 20MP',
       sensorWidth: 17.3,
@@ -269,6 +360,9 @@ export async function ensureSeedData(): Promise<void> {
     },
     {
       id: newId('preset'),
+      seriesId: seriesP1,
+      revision: 1,
+      effectiveAt: now - 60 * day,
       name: 'Zenmuse P1 35mm',
       cameraModel: 'Zenmuse P1',
       sensorWidth: 35.9,
@@ -278,6 +372,9 @@ export async function ensureSeedData(): Promise<void> {
     },
     {
       id: newId('preset'),
+      seriesId: seriesP4,
+      revision: 1,
+      effectiveAt: now - 60 * day,
       name: 'Phantom 4 RTK',
       cameraModel: 'FC6310R',
       sensorWidth: 13.2,

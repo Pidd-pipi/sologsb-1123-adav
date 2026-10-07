@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview --port 5173"
+    "preview": "vite preview --port 5173",
+    "test:revisions": "esbuild scripts/test-revisions.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/test-revisions.mjs --log-level=warning && node node_modules/.cache/test-revisions.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.1",
@@ -18,9 +19,11 @@
     "zustand": "^4.5.5"
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
     "@types/react": "^18.3.10",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "fake-indexeddb": "~5.0.2",
     "typescript": "^5.6.2",
     "vite": "^5.4.8"
   }

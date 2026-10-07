@@ -221,6 +221,14 @@ export default function WaypointTable() {
         </Typography.Title>
         <Tag color="green">航点 {rows.length} 个</Tag>
         <Tag>传感器 {mission.sensorWidth}×{mission.sensorHeight} mm / f{mission.focalLength} mm</Tag>
+        {mission.presetSeriesId ? (
+          <Tag color={mission.status === '已飞行' || mission.status === '已归档' ? 'green' : 'geekblue'}>
+            相机 rev{mission.presetRevision}
+            {mission.status === '已飞行' || mission.status === '已归档' ? ' · 飞行时锁定' : ' · 跟随最新'}
+          </Tag>
+        ) : (
+          <Tag>手工相机参数</Tag>
+        )}
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/missions/${mission.id}/route`}>航线规划</Link>

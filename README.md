@@ -28,6 +28,7 @@ docker compose down
 | 路由 | React Router v6（BrowserRouter） |
 | 地图 | 高德地图 JS API 2.0（可选，key 缺失时自动退化） |
 | 本地存储 | IndexedDB（Dexie 4），缩略图单独建表，含结构版本号与升级迁移 |
+| 相机参数 | 预设带修订号：改参数只追加不覆盖，规划中任务跟最新修订，已飞/归档任务锁飞行时修订 |
 
 ## VITE_AMAP_KEY 配置与退化行为（重要）
 
@@ -83,7 +84,7 @@ sologsb-1123/
 | `/missions/:id/route` | 航线规划主视图：地图/网格绘制测区与航点折线，右侧参数面板改航高/航速/重叠率，实时回算 GSD、航线间距、预计张数与耗时 | Mission、Waypoint、FlightLine |
 | `/missions/:id/waypoints` | 航点明细：经纬度粘贴导入、批量改高度、上下移与拖拽换序、单点视场预览 | Waypoint |
 | `/missions/:id/assets` | 成果影像编目：卡片格子列出片号/缩略图/GSD/质量，多选标记质量、定位到图、导出清单 | ImageAsset |
-| `/settings/camera` | 相机与传感器参数预设管理，选定预设后带入任务的焦距/像元/传感器 | CameraPreset、Mission |
+| `/settings/camera` | 相机与传感器参数预设管理：预设以「系列 + 修订」组织，改参数追加新修订（可查修订史），选定系列最新修订带入规划中/待飞行任务 | CameraPreset、Mission |
 
 `/` 重定向到 `/missions`，未匹配路由同样兜底到 `/missions`。
 
@@ -97,8 +98,15 @@ sologsb-1123/
 
 ## 数据存储说明
 
-- 数据库名 `gbdronemap`，当前结构版本 **v2**（`localStorage['gbdronemap:db-version']` 记录）。
-- 六张表：`missions`（任务）、`waypoints`（航点）、`lines`（航线参数）、`assets`（成果影像条目）、`thumbs`（**缩略图单独建表**，dataUrl）、`presets`（相机预设）。
-- v1 → v2 迁移：为老任务补 `areaPolygon`/传感器默认值，为航线补 `updatedAt`/`batteryCount`，并新增索引。
+- 数据库名 `gbdronemap`，当前结构版本 **v3**（`localStorage['gbdronemap:db-version']` 记录）。
+- 六张表：`missions`（任务）、`waypoints`（航点）、`lines`（航线参数）、`assets`（成果影像条目）、`thumbs`（**缩略图单独建表**，dataUrl）、`presets`（相机预设修订）。
+- **相机预设修订（v3 核心）**：
+  - 同一款相机归为一个系列（`seriesId`），每次改参数**追加**一行（`revision` 从 1 递增、`effectiveAt` 生效时间），旧修订永久保留、绝不覆盖。
+  - 任务冗余相机参数快照（焦距/像元/传感器），并记录 `presetSeriesId` + `presetRevision`：**规划中/待飞行**跟随系列最新修订，追加修订时在同一事务内传播并重算 GSD、航线间距、预计张数与架次；**已飞行/已归档**锁在飞行时修订（转态时先同步到当时最新再锁定），之后任何修订都不影响其历史指标。
+  - 成果影像 `assets` 表的 GSD/质量是飞行实测值，永不被预设修订改写。
+  - 任务台账卡片标出每个任务的系列与修订号，规划中任务落后于最新修订时显示「落后」标签，可单点或一键同步重试；追加修订与传播在单个 Dexie 事务内，写入失败整体回滚，旧修订原样保留，可直接重试。
+- 历史迁移：
+  - v1 → v2：为老任务补 `areaPolygon`/传感器默认值，为航线补 `updatedAt`/`batteryCount`，并新增索引。
+  - v2 → v3：旧预设补为各自系列的 rev1（生效时间置为最早）；旧任务按**飞行日期**匹配当时生效的修订（先按相机四参数全等匹配，再按相机型号兜底），匹配不到时用任务自身快照补一条「基础预设」rev1，参数相同的多个任务共用同一条。
 - 容器无状态、不挂载命名卷；清空站点数据即回到初始示范数据。
-- 首次打开灌入 2 个示范任务、5 个航点、2 条航线参数、6 条成果影像条目（含缩略图）与 3 套相机预设。
+- 首次打开灌入 2 个示范任务、5 个航点、2 条航线参数、6 条成果影像条目（含缩略图）与 3 套相机预设（rev1；已飞任务锁定、待飞任务跟随）。

@@ -4,6 +4,7 @@ import { Alert, Button, Card, Col, Row, Space, Table, Tag, Typography, type Tabl
 import { useMissionStore } from '../stores/missionStore';
 import { useWaypointStore } from '../stores/waypointStore';
 import { useRouteMetrics, DEFAULT_ROUTE_PARAMS, type RouteParams } from '../hooks/useRouteMetrics';
+import { isMissionStale, isRevisionLocked, latestRevision, missionRevision } from '../utils/presetRevisions';
 import AmapRouteView from '../components/common/AmapRouteView';
 import OverlapCalcPanel from '../components/common/OverlapCalcPanel';
 import { loadFlightLine, saveFlightLine, splitSorties } from '../utils/db';
@@ -22,9 +23,15 @@ const lineColumns: NonNullable<TableProps<LineRow>['columns']> = [
 export default function RoutePlanner() {
   const { id = '' } = useParams();
   const missions = useMissionStore((s) => s.items);
+  const presets = useMissionStore((s) => s.presets);
+  const syncMission = useMissionStore((s) => s.syncMission);
   const waypoints = useWaypointStore((s) => s.items);
   const addWaypoint = useWaypointStore((s) => s.add);
   const mission = missions.find((m) => m.id === id);
+  const locked = mission ? isRevisionLocked(mission) : false;
+  const stale = mission ? isMissionStale(presets, mission) : false;
+  const pinnedRev = mission ? missionRevision(presets, mission) : undefined;
+  const latestRev = mission?.presetSeriesId ? latestRevision(presets, mission.presetSeriesId) : undefined;
   const missionWaypoints = useMemo(
     () => waypoints.filter((w) => w.missionId === id).sort((a, b) => a.seq - b.seq),
     [waypoints, id],
@@ -58,6 +65,10 @@ export default function RoutePlanner() {
 
   const onSave = async () => {
     if (!mission) return;
+    if (locked) {
+      setError('已飞/归档任务锁在飞行时修订上，历史航线参数不可改写');
+      return;
+    }
     const line: FlightLine = {
       id: newId('line'),
       missionId: mission.id,
@@ -129,6 +140,14 @@ export default function RoutePlanner() {
         <Tag color="cyan">{mission.purpose}</Tag>
         <Tag>{mission.areaName}</Tag>
         <Tag color={missionWaypoints.length > 0 ? 'green' : 'default'}>航点 {missionWaypoints.length} 个</Tag>
+        {mission.presetSeriesId ? (
+          <Tag color={locked ? 'green' : 'geekblue'}>
+            {pinnedRev?.name ?? '相机预设'} rev{mission.presetRevision}
+            {locked ? ' · 飞行时锁定' : ''}
+          </Tag>
+        ) : (
+          <Tag>手工相机参数</Tag>
+        )}
         <div style={{ flex: 1 }} />
         <Button type="link">
           <Link to={`/missions/${mission.id}/waypoints`}>航点明细</Link>
@@ -145,6 +164,36 @@ export default function RoutePlanner() {
       </Space>
 
       {error ? <Alert type="error" showIcon message={error} closable onClose={() => setError('')} /> : null}
+
+      {locked && mission.presetSeriesId ? (
+        <Alert
+          type="success"
+          showIcon
+          message={`该任务已${mission.status}：相机参数锁在飞行时的「${pinnedRev?.name ?? '相机预设'}」rev${mission.presetRevision}。即使预设后来追加了新修订，本页 GSD、航线间距、预计张数与成果影像分辨率/质量都保持不变。`}
+        />
+      ) : null}
+      {stale ? (
+        <Alert
+          type="warning"
+          showIcon
+          action={
+            <Button
+              size="small"
+              onClick={async () => {
+                try {
+                  await syncMission(mission.id);
+                  setSavedText(`已同步到 rev${latestRev?.revision}，指标按新修订重算 ${new Date().toLocaleString('zh-CN')}`);
+                } catch {
+                  setError('同步写入失败，旧修订未改动，可再次点击重试');
+                }
+              }}
+            >
+              同步到 rev{latestRev?.revision} 并重算
+            </Button>
+          }
+          message={`相机参数落后：任务锁在 rev${mission.presetRevision}，系列最新为 rev${latestRev?.revision}（可能是上次写入失败留下的旧修订）。同步后 GSD、航线间距、预计张数与架次按最新修订重算。`}
+        />
+      ) : null}
 
       <Row gutter={14}>
         <Col span={15}>
@@ -197,6 +246,8 @@ export default function RoutePlanner() {
             metrics={metrics}
             onSave={onSave}
             savedText={savedText}
+            saveDisabled={locked}
+            saveHint={locked ? '任务已飞/归档，参数锁定：仅可试算，不能保存覆盖' : undefined}
           />
         </Col>
       </Row>
